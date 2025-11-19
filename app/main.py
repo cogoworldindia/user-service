@@ -8,23 +8,23 @@ import uvicorn
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handles startup and shutdown lifecycle events."""
-    database_url = settings.DATABASE_URL
+    database_url = settings.DATABASE_URL_SYNC
     if not database_url:
         raise ValueError("DATABASE_URL not found in environment variables.")
 
     # Ensure DB exists
-    await ensure_database_exists(database_url)
+    ensure_database_exists(database_url)
 
     # Run Alembic migrations
-    await run_migrations()
+    run_migrations()
 
     # Redis initialization 
-    await redis_client.init_redis()
+    # await redis_client.init_redis()
 
     yield  # App runs while inside this context
 
     # Shutdown: close Redis connection
-    await redis_client.close_redis()
+    # await redis_client.close_redis()
 
     print(" Shutting down, cleaning up resources...")
 
@@ -33,6 +33,7 @@ app = FastAPI(
     title="User Service",
     description="Handles user authentication and profile management.",
     version="1.0.0",
+    lifespan=lifespan
 )
 
 
