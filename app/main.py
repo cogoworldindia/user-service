@@ -1,5 +1,5 @@
 from fastapi import FastAPI
-from app.db import ensure_database_exists, run_migrations, redis_client
+from app.db import redis_client
 from app.core.config import settings
 from contextlib import asynccontextmanager
 from app.controllers import router as api_router
@@ -8,17 +8,7 @@ import uvicorn
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handles startup and shutdown lifecycle events."""
-    database_url = settings.DATABASE_URL
-    if not database_url:
-        raise ValueError("DATABASE_URL not found in environment variables.")
-
-    # Ensure DB exists
-    await ensure_database_exists(database_url)
-
-    # Run Alembic migrations
-    await run_migrations()
-
-    # Redis initialization 
+    # Redis initialization
     await redis_client.init_redis()
 
     yield  # App runs while inside this context
