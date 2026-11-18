@@ -1,0 +1,13 @@
+.env*
+!.env.example
+**/credentials/
+**/secrets/
+*.pem
+*.json.key
+tests/
+.venv/
+.git
+**/__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/

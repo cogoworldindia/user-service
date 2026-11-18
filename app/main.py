@@ -1,44 +1,58 @@
-from fastapi import FastAPI
-from app.db import redis_client
-from app.core.config import settings
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from app.controllers import router as api_router
-import uvicorn
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Handles startup and shutdown lifecycle events."""
-    # Redis initialization
-    await redis_client.init_redis()
+from cogo_common.app import create_service_app
+from cogo_common.auth import JWKSClient, TokenVerifier
+from cogo_common.db import Database
+from cogo_common.events.broker import create_broker
+from cogo_common.events.topology import declare_topology
+from cogo_common.http import create_http_client
+from fastapi import FastAPI
 
-    yield  # App runs while inside this context
-
-    # Shutdown: close Redis connection
-    await redis_client.close_redis()
-
-    print(" Shutting down, cleaning up resources...")
+from app.api import router
+from app.config import Settings, get_settings
+from app.consumers import register_consumers
 
 
-app = FastAPI(
-    title="User Service",
-    description="Handles user authentication and profile management.",
-    version="1.0.0",
-)
-
-
-# Include routers
-app.include_router(api_router, prefix="/v1/users", tags=["Users"])
-
-# Health check route
-@app.get("/health", tags=["Health"])
-def health_check():
-    return {"status": "ok", "service": "auth_service"}
-
-# Entry point for running app
-if __name__ == "__main__":
-    uvicorn.run(
-        "app.main:app",
-        host="127.0.0.1",
-        port=int(settings.APP_PORT),  # read from .env or settings
-        reload=True
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or get_settings()
+    db = Database(
+        settings.DATABASE_URL,
+        pool_size=settings.DB_POOL_SIZE,
+        max_overflow=settings.DB_MAX_OVERFLOW,
     )
+    broker = create_broker(settings.RABBITMQ_URL, service_name=settings.SERVICE_NAME)
+    if settings.CONSUMERS_ENABLED:
+        register_consumers(broker, db.sessionmaker)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        http = create_http_client(timeout=5.0)
+        jwks = JWKSClient(settings.AUTH_JWKS_URL, http=http)
+        app.state.token_verifier = TokenVerifier(
+            jwks, issuer=settings.JWT_ISSUER, audience=settings.JWT_AUDIENCE
+        )
+        await jwks.prefetch()
+        await broker.connect()
+        await declare_topology(broker)
+        await broker.start()
+        try:
+            yield
+        finally:
+            await broker.stop()
+            await http.aclose()
+            await db.dispose()
+
+    app = create_service_app(
+        settings,
+        title="CoGo User Service",
+        lifespan=lifespan,
+        engine=db.engine,
+        health_checks={"postgres": db.ping, "rabbitmq": lambda: broker.ping(timeout=2.0)},
+        max_body_size=64 * 1024,
+    )
+    app.state.settings = settings
+    app.state.db = db
+    app.state.broker = broker
+    app.include_router(router)
+    return app
