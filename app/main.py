@@ -5,7 +5,7 @@ from cogo_common.app import create_service_app
 from cogo_common.auth import JWKSClient, TokenVerifier
 from cogo_common.auth.service_tokens import build_service_auth
 from cogo_common.db import Database
-from cogo_common.events.broker import create_broker
+from cogo_common.events.broker import broker_ready, create_broker, start_broker
 from cogo_common.events.outbox import OutboxRelay, rabbit_publisher
 from cogo_common.events.topology import declare_topology
 from cogo_common.http import create_http_client
@@ -51,9 +51,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await jwks.prefetch()
         if settings.MEDIA_DEV_BOOTSTRAP:
             await app.state.media.dev_bootstrap()
-        await broker.connect()
-        await declare_topology(broker)
-        await broker.start()
+        await start_broker(broker, declare=declare_topology)
         relay = OutboxRelay(db.sessionmaker, rabbit_publisher(broker))
         relay.start()
         try:
@@ -71,7 +69,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         title="CoGo User Service",
         lifespan=lifespan,
         engine=db.engine,
-        health_checks={"postgres": db.ping, "rabbitmq": lambda: broker.ping(timeout=2.0)},
+        health_checks={"postgres": db.ping, "rabbitmq": lambda: broker_ready(broker)},
         max_body_size=64 * 1024,
     )
     app.state.settings = settings
