@@ -1,45 +1,31 @@
-import asyncio
+"""user-service's queue (spec §1A.4): one durable queue, handlers per event type."""
 
-from cogo_common.events.contracts import UserRegistered
+from cogo_common.events.contracts import SocialFollowed, UserRegistered
+from cogo_common.events.dispatch import EventDispatcher
 from cogo_common.events.envelope import EventEnvelope
-from cogo_common.events.topology import EVENTS_EXCHANGE, USER_SERVICE_USER_REGISTERED
-from cogo_common.logging import get_logger
-from faststream import AckPolicy
-from faststream.exceptions import RejectMessage
+from cogo_common.events.topology import USER_SERVICE, RoutingKeys
 from faststream.rabbit import RabbitBroker
-from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.service import UserService
 
-log = get_logger(__name__)
-
 
 def register_consumers(
     broker: RabbitBroker, sessionmaker: async_sessionmaker[AsyncSession]
-) -> None:
-    @broker.subscriber(
-        USER_SERVICE_USER_REGISTERED.queue(), EVENTS_EXCHANGE, ack_policy=AckPolicy.NACK_ON_ERROR
-    )
-    async def on_user_registered(event: EventEnvelope) -> None:
-        try:
-            payload = UserRegistered.model_validate(event.data)
-        except ValidationError:
-            log.error("user_registered_invalid_payload", event_id=str(event.id))
-            raise RejectMessage() from None  # poison message -> DLQ immediately
+) -> EventDispatcher:
+    dispatcher = EventDispatcher(sessionmaker)
 
-        delay = 0.5
-        for attempt in range(3):
-            try:
-                async with sessionmaker() as session:
-                    created = await UserService(session).handle_registered(
-                        event.id, payload.user_id
-                    )
-                log.info("user_registered_processed", user_id=str(payload.user_id), new=created)
-                return
-            except Exception:
-                if attempt == 2:
-                    raise  # nack -> redelivered; dead-lettered after the queue delivery limit
-                log.warning("user_registered_retry", attempt=attempt + 1)
-                await asyncio.sleep(delay)
-                delay *= 2
+    @dispatcher.on(RoutingKeys.USER_REGISTERED)
+    async def on_registered(event: EventEnvelope, session: AsyncSession) -> None:
+        await UserService(session).ensure_user(UserRegistered.model_validate(event.data).user_id)
+
+    @dispatcher.on(RoutingKeys.SOCIAL_FOLLOWED, RoutingKeys.SOCIAL_UNFOLLOWED)
+    async def on_follow(event: EventEnvelope, session: AsyncSession) -> None:
+        payload = SocialFollowed.model_validate(event.data)
+        delta = 1 if event.type == RoutingKeys.SOCIAL_FOLLOWED else -1
+        service = UserService(session)
+        await service.adjust_counter(payload.follower_id, "following_count", delta)
+        await service.adjust_counter(payload.followee_id, "followers_count", delta)
+
+    dispatcher.subscribe(broker, USER_SERVICE)
+    return dispatcher

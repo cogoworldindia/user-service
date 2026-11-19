@@ -4,27 +4,32 @@ import subprocess
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from uuid import UUID, uuid4
 
+import boto3
 import httpx
 import jwt
 import pytest
 from asgi_lifespan import LifespanManager
+from botocore.config import Config
 from cogo_common.auth import StaticKeyProvider, TokenVerifier
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from jwt.algorithms import OKPAlgorithm
 
+from app.clients import Place
 from app.config import Settings
 from app.main import create_app
 
 SERVICE_DIR = Path(__file__).resolve().parents[1]
 SIGNING_KEY = Ed25519PrivateKey.generate()
 _JWK = {**json.loads(OKPAlgorithm.to_jwk(SIGNING_KEY.public_key())), "kid": "test", "alg": "EdDSA"}
+MEDIA_KEY, MEDIA_SECRET = "cogo", "cogo-secret-123"
 
 
-def mint(user_id: UUID, **overrides: Any) -> str:
+def mint(user_id: UUID) -> str:
     now = int(time.time())
     claims = {
         "iss": "cogo-auth",
@@ -35,7 +40,6 @@ def mint(user_id: UUID, **overrides: Any) -> str:
         "exp": now + 300,
         "jti": uuid4().hex,
     }
-    claims.update(overrides)
     return jwt.encode(claims, SIGNING_KEY, algorithm="EdDSA", headers={"kid": "test"})
 
 
@@ -43,13 +47,40 @@ def mint(user_id: UUID, **overrides: Any) -> str:
 def containers() -> Iterator[dict[str, str]]:
     from testcontainers.community.postgres import PostgresContainer
     from testcontainers.community.rabbitmq import RabbitMqContainer
+    from testcontainers.core.container import DockerContainer
 
+    s3 = (
+        DockerContainer("rustfs/rustfs:1.0.6")
+        .with_exposed_ports(9000)
+        .with_env("RUSTFS_ACCESS_KEY", MEDIA_KEY)
+        .with_env("RUSTFS_SECRET_KEY", MEDIA_SECRET)
+    )
     with (
         PostgresContainer("postgres:17-alpine", driver="asyncpg") as pg,
         RabbitMqContainer("rabbitmq:4-management-alpine") as rmq,
+        s3,
     ):
+        endpoint = f"http://{s3.get_container_host_ip()}:{s3.get_exposed_port(9000)}"
+        client = boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id=MEDIA_KEY,
+            aws_secret_access_key=MEDIA_SECRET,
+            region_name="ap-south-1",
+            config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+        )
+        for _ in range(40):
+            try:
+                client.create_bucket(Bucket="cogo-media")
+                break
+            except Exception:
+                time.sleep(0.25)
         rp = rmq.get_connection_params()
-        yield {"db": pg.get_connection_url(), "amqp": f"amqp://guest:guest@{rp.host}:{rp.port}/"}
+        yield {
+            "db": pg.get_connection_url(),
+            "amqp": f"amqp://guest:guest@{rp.host}:{rp.port}/",
+            "s3": endpoint,
+        }
 
 
 @pytest.fixture(scope="session")
@@ -60,20 +91,69 @@ def migrated(containers: dict[str, str]) -> dict[str, str]:
 
 
 @pytest.fixture(scope="session")
-async def app(migrated: dict[str, str]) -> AsyncIterator[FastAPI]:
-    containers = migrated
+def service_keys(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    root = tmp_path_factory.mktemp("svc")
+    (root / "public").mkdir()
+    key = Ed25519PrivateKey.generate()
+    (root / "user-service.pem").write_bytes(
+        key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+    )
+    (root / "public" / "user-service.pem").write_bytes(
+        key.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+        )
+    )
+    return root / "user-service.pem", root / "public"
+
+
+class FakePlaces:
+    PLACES: ClassVar[dict[str, Place]] = {
+        "pl_noida": Place("pl_noida", "Noida", "Uttar Pradesh", 28.5355, 77.3910)
+    }
+
+    async def resolve(self, place_id: str) -> Place:
+        from cogo_common.errors import BadRequest
+
+        if place_id not in self.PLACES:
+            raise BadRequest("Unknown place", error_type="invalid_place")
+        return self.PLACES[place_id]
+
+
+class FakeSocial:
+    def __init__(self) -> None:
+        self.result: dict[UUID, bool] | None = {}
+
+    async def follow_status(self, viewer_id: UUID, user_ids: list[UUID]) -> dict[UUID, bool] | None:
+        return self.result
+
+
+@pytest.fixture(scope="session")
+async def app(migrated: dict[str, str], service_keys: tuple[Path, Path]) -> AsyncIterator[FastAPI]:
     settings = Settings(
         ENV="test",
         LOG_JSON=False,
-        DATABASE_URL=containers["db"],
-        RABBITMQ_URL=containers["amqp"],
+        DATABASE_URL=migrated["db"],
+        RABBITMQ_URL=migrated["amqp"],
         AUTH_JWKS_URL="http://127.0.0.1:9/unreachable",
+        SERVICE_PRIVATE_KEY_FILE=service_keys[0],
+        SERVICE_PUBLIC_KEYS_DIR=service_keys[1],
+        MEDIA_S3_ENDPOINT=migrated["s3"],
+        MEDIA_PUBLIC_BASE_URL=f"{migrated['s3']}/cogo-media",
+        MEDIA_ACCESS_KEY=MEDIA_KEY,
+        MEDIA_SECRET_KEY=MEDIA_SECRET,
+        MEDIA_MAX_BYTES=10_000,
     )
     application = create_app(settings)
     async with LifespanManager(application):
         application.state.token_verifier = TokenVerifier(
             StaticKeyProvider([jwt.PyJWK(_JWK)]), issuer="cogo-auth", audience="cogo-api"
         )
+        application.state.places = FakePlaces()
+        application.state.social = FakeSocial()
         yield application
 
 
@@ -88,3 +168,6 @@ async def client(app: FastAPI) -> AsyncIterator[httpx.AsyncClient]:
 @pytest.fixture
 def as_user() -> Callable[[UUID], dict[str, str]]:
     return lambda user_id: {"Authorization": f"Bearer {mint(user_id)}"}
+
+
+Any_ = Any
