@@ -11,7 +11,7 @@ from cogo_common.events.outbox import enqueue
 from cogo_common.events.topology import RoutingKeys
 from cogo_common.ids import new_id
 from cogo_common.scoring import age_years
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +21,7 @@ from app.clients import Place
 from app.media import CONTENT_TYPES, MediaStore
 from app.models import (
     AccountStatus,
+    BlockProjection,
     MediaStatus,
     MediaUpload,
     PersonalityTag,
@@ -117,10 +118,32 @@ class UserService:
             raise NotFound("User not found")
         return user
 
-    async def get_public(self, user_id: UUID) -> User:
+    async def get_public(self, user_id: UUID, viewer_id: UUID | None = None) -> User:
         user = await self._load(user_id)
         if user is None or user.account_status != AccountStatus.ACTIVE:
             raise NotFound("User not found")
+        if (
+            viewer_id is not None
+            and viewer_id != user_id
+            and await self._session.scalar(
+                select(
+                    exists().where(
+                        BlockProjection.active.is_(True),
+                        or_(
+                            and_(
+                                BlockProjection.blocker_id == viewer_id,
+                                BlockProjection.blocked_id == user_id,
+                            ),
+                            and_(
+                                BlockProjection.blocker_id == user_id,
+                                BlockProjection.blocked_id == viewer_id,
+                            ),
+                        ),
+                    )
+                )
+            )
+        ):
+            raise NotFound("This profile isn't available", error_type="profile_unavailable")
         return user
 
     async def tags(self, ids: list[int] | None = None) -> list[PersonalityTag]:

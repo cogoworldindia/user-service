@@ -151,9 +151,21 @@ class MediaUpload(Base):
     )
 
 
+class BlockProjection(Base):
+    """Fed by social.user_blocked/unblocked; unblock keeps a tombstone (active=false)."""
+
+    __tablename__ = "block_projection"
+
+    blocker_id: Mapped[UUID] = mapped_column(primary_key=True)
+    blocked_id: Mapped[UUID] = mapped_column(primary_key=True)
+    active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"))
+    source_version: Mapped[int] = mapped_column(BigInteger, server_default=text("0"))
+
+
 __all__ = [
     "AccountStatus",
     "Base",
+    "BlockProjection",
     "Gender",
     "KycLevel",
     "MediaUpload",

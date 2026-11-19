@@ -334,3 +334,38 @@ async def test_journey_events_maintain_journeys_count(app: FastAPI) -> None:
     async with app.state.db.sessionmaker() as s:
         user = await s.get(User, owner)
     assert user is not None and user.journeys_count == 1
+
+
+async def test_blocked_profiles_are_unavailable_both_ways(
+    client: httpx.AsyncClient, as_user: Auth, app: FastAPI
+) -> None:
+    a, b = uuid4(), uuid4()
+    for u in (a, b):
+        await client.get("/v1/me", headers=as_user(u))
+
+    async def block_event(kind: str, version: int) -> None:
+        env = EventEnvelope(
+            type=kind,
+            producer="social-service",
+            data={"blocker_id": str(a), "blocked_id": str(b), "version": version},
+        )
+        await app.state.broker.publish(
+            env.model_dump(mode="json"),
+            exchange=EVENTS_EXCHANGE,
+            routing_key=env.type,
+            message_id=str(env.id),
+        )
+
+        async def done() -> bool:
+            async with app.state.db.sessionmaker() as s:
+                return await s.get(ProcessedEvent, env.id) is not None
+
+        await _wait_for(done)
+
+    await block_event("social.user_blocked", 10)
+    for viewer, target in ((a, b), (b, a)):
+        r = await client.get(f"/v1/users/{target}", headers=as_user(viewer))
+        assert r.status_code == 404 and r.json()["error"]["type"] == "profile_unavailable"
+    await block_event("social.user_unblocked", 20)
+    await block_event("social.user_blocked", 15)  # stale, older than the unblock
+    assert (await client.get(f"/v1/users/{b}", headers=as_user(a))).status_code == 200

@@ -227,7 +227,7 @@ async def get_user(
     users: Users,
     social: Annotated[SocialClient, Depends(_social)],
 ) -> Envelope[PublicProfileOut]:
-    user = await users.get_public(user_id)
+    user = await users.get_public(user_id, viewer_id=principal.user_id)
     tags = await users.tags(list(user.personality_tag_ids or []))
     following = None
     if user_id != principal.user_id:
