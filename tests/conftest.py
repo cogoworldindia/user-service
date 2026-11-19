@@ -123,6 +123,16 @@ class FakePlaces:
         return self.PLACES[place_id]
 
 
+class FakeChat:
+    def __init__(self) -> None:
+        self.result: dict[UUID, str] | None = {}
+
+    async def connection_status(
+        self, viewer_id: UUID, user_ids: list[UUID]
+    ) -> dict[UUID, str] | None:
+        return self.result
+
+
 class FakeSocial:
     def __init__(self) -> None:
         self.result: dict[UUID, bool] | None = {}
@@ -154,6 +164,7 @@ async def app(migrated: dict[str, str], service_keys: tuple[Path, Path]) -> Asyn
         )
         application.state.places = FakePlaces()
         application.state.social = FakeSocial()
+        application.state.chat = FakeChat()
         yield application
 
 

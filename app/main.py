@@ -13,7 +13,7 @@ from cogo_common.internal_http import InternalClient
 from fastapi import FastAPI
 
 from app.api import router
-from app.clients import PlacesClient, SocialClient
+from app.clients import ChatClient, PlacesClient, SocialClient
 from app.config import Settings, get_settings
 from app.consumers import register_consumers
 from app.media import MediaStore
@@ -48,6 +48,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         app.state.places = PlacesClient(journey)
         app.state.social = SocialClient(social)
+        chat = InternalClient(settings.CHAT_SERVICE_URL, audience="chat-service", signer=signer)
+        app.state.chat = ChatClient(chat)
         await jwks.prefetch()
         if settings.MEDIA_DEV_BOOTSTRAP:
             await app.state.media.dev_bootstrap()
@@ -61,6 +63,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await broker.stop()
             await journey.aclose()
             await social.aclose()
+            await chat.aclose()
             await http.aclose()
             await db.dispose()
 

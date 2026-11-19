@@ -134,20 +134,24 @@ async def test_public_profile_hides_private_fields_and_degrades(
         json={"name": "Owner", "dob": "1990-01-01", "gender": "male", "city_place_id": "pl_noida"},
     )
     app.state.social.result = {owner: True}
+    app.state.chat.result = {owner: "connected"}
     r = await client.get(f"/v1/users/{owner}", headers=as_user(viewer))
     data = r.json()["data"]
     assert (
-        r.status_code == 200 and data["is_following"] is True and data["connection_status"] is None
+        r.status_code == 200
+        and data["is_following"] is True
+        and data["connection_status"] == "connected"
     )
     assert (
         "dob" not in data
         and "gender" not in data
         and data["city"] == {"name": "Noida", "place_id": None}
     )
-    app.state.social.result = None  # social-service down -> null, not an error
-    assert (await client.get(f"/v1/users/{owner}", headers=as_user(viewer))).json()["data"][
-        "is_following"
-    ] is None
+    app.state.social.result = None  # social- and chat-service down -> null, not an error
+    app.state.chat.result = None
+    degraded = (await client.get(f"/v1/users/{owner}", headers=as_user(viewer))).json()["data"]
+    assert degraded["is_following"] is None and degraded["connection_status"] is None
+    app.state.chat.result = {}
     async with app.state.db.sessionmaker() as s, s.begin():
         await s.execute(
             update(User).where(User.id == owner).values(account_status=AccountStatus.SUSPENDED)

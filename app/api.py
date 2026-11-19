@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Annotated, Any
@@ -8,7 +9,7 @@ from cogo_common.responses import Envelope, ok
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clients import PlacesClient, SocialClient
+from app.clients import ChatClient, PlacesClient, SocialClient
 from app.models import KycLevel, User
 from app.schemas import (
     CityOut,
@@ -47,6 +48,11 @@ Users = Annotated[UserService, Depends(_service)]
 def _places(request: Request) -> PlacesClient:
     places: PlacesClient = request.app.state.places
     return places
+
+
+def _chat(request: Request) -> ChatClient:
+    chat: ChatClient = request.app.state.chat
+    return chat
 
 
 def _social(request: Request) -> SocialClient:
@@ -226,13 +232,18 @@ async def get_user(
     principal: CurrentUser,
     users: Users,
     social: Annotated[SocialClient, Depends(_social)],
+    chat: Annotated[ChatClient, Depends(_chat)],
 ) -> Envelope[PublicProfileOut]:
     user = await users.get_public(user_id, viewer_id=principal.user_id)
     tags = await users.tags(list(user.personality_tag_ids or []))
-    following = None
-    if user_id != principal.user_id:
-        status = await social.follow_status(principal.user_id, [user_id])
-        following = status.get(user_id, False) if status is not None else None
+    following, connection = None, None
+    if user_id != principal.user_id:  # both relation calls in parallel, null on failure
+        follows, connections = await asyncio.gather(
+            social.follow_status(principal.user_id, [user_id]),
+            chat.connection_status(principal.user_id, [user_id]),
+        )
+        following = follows.get(user_id, False) if follows is not None else None
+        connection = connections.get(user_id, "none") if connections is not None else None
     return ok(
         PublicProfileOut(
             id=user.id,
@@ -248,6 +259,6 @@ async def get_user(
             stats=_stats(user),
             kyc_level=user.kyc_level,
             is_following=following,
-            connection_status=None,  # chat-service lands in M5
+            connection_status=connection,
         )
     )

@@ -22,6 +22,7 @@ class Settings(ServiceSettings):
     SERVICE_PUBLIC_KEYS_DIR: Path = Path("/run/service-keys")
     JOURNEY_SERVICE_URL: str = "http://journey-service:8000"
     SOCIAL_SERVICE_URL: str = "http://social-service:8000"
+    CHAT_SERVICE_URL: str = "http://chat-service:8000"
 
     # Media (S3-compatible: MinIO in dev, S3/GCS in prod)
     MEDIA_BUCKET: str = "cogo-media"
