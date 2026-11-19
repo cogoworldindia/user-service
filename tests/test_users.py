@@ -287,3 +287,50 @@ async def test_poison_event_dead_lettered(app: FastAPI) -> None:
 async def test_requires_authentication(client: httpx.AsyncClient) -> None:
     for path in ("/v1/me", "/v1/personality-tags", f"/v1/users/{uuid4()}"):
         assert (await client.get(path)).status_code == 401
+
+
+async def test_journey_events_maintain_journeys_count(app: FastAPI) -> None:
+    owner = uuid4()
+    place = {"place_id": "p", "name": "X", "lat": 1.0, "lng": 2.0}
+
+    def journey_event(kind: str, jid: UUID) -> EventEnvelope:
+        return EventEnvelope(
+            type=kind,
+            producer="journey-service",
+            data={
+                "id": str(jid),
+                "owner_id": str(owner),
+                "origin": place,
+                "destination": place,
+                "start_at": "2026-12-01T08:00:00Z",
+                "end_at": "2026-12-02T08:00:00Z",
+                "who_can_join": "anyone",
+                "group_size": 4,
+                "seats_taken": 1,
+                "status": "upcoming",
+                "version": 1,
+            },
+        )
+
+    j1, j2 = uuid4(), uuid4()
+    events = [
+        journey_event("journey.created", j1),
+        journey_event("journey.created", j2),
+        journey_event("journey.deleted", j1),
+    ]
+    for env in events:
+        await app.state.broker.publish(
+            env.model_dump(mode="json"),
+            exchange=EVENTS_EXCHANGE,
+            routing_key=env.type,
+            message_id=str(env.id),
+        )
+
+    async def done() -> bool:
+        async with app.state.db.sessionmaker() as s:
+            return await s.get(ProcessedEvent, events[-1].id) is not None
+
+    await _wait_for(done)
+    async with app.state.db.sessionmaker() as s:
+        user = await s.get(User, owner)
+    assert user is not None and user.journeys_count == 1
