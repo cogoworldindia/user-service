@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi import FastAPI
 from jwt.algorithms import OKPAlgorithm
+from pydantic import SecretStr
 
 from app.clients import Place
 from app.config import Settings
@@ -133,6 +134,24 @@ class FakeChat:
         return self.result
 
 
+class FakeMailer:
+    """Captures official-email codes instead of queuing them for notification-service."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+        self.fail = False
+
+    async def send_code(self, email: str, code: str, *, ttl_seconds: int) -> None:
+        if self.fail:
+            from cogo_common.errors import ServiceUnavailable
+
+            raise ServiceUnavailable("Could not send the code right now, please retry")
+        self.sent.append((email, code))
+
+    def code_for(self, email: str) -> str:
+        return next(code for to, code in reversed(self.sent) if to == email.lower())
+
+
 class FakeSocial:
     def __init__(self) -> None:
         self.result: dict[UUID, bool] | None = {}
@@ -156,9 +175,18 @@ async def app(migrated: dict[str, str], service_keys: tuple[Path, Path]) -> Asyn
         MEDIA_ACCESS_KEY=MEDIA_KEY,
         MEDIA_SECRET_KEY=MEDIA_SECRET,
         MEDIA_MAX_BYTES=10_000,
+        KYC_OTP_HMAC_KEY=SecretStr("test-otp-key"),
+        KYC_MOCK_WEBHOOK_SECRET=SecretStr("test-mock-secret"),
+        KYC_PUBLIC_BASE_URL="http://user",
+        KYC_MOCK_WEBHOOK_URL="http://user/v1/webhooks/kyc/mock",
     )
     application = create_app(settings)
     async with LifespanManager(application):
+        # the mock provider calls the webhook of this same app, in-process
+        application.state.kyc_http = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=application), base_url="http://user"
+        )
+        application.state.kyc_mailer = FakeMailer()
         application.state.token_verifier = TokenVerifier(
             StaticKeyProvider([jwt.PyJWK(_JWK)]), issuer="cogo-auth", audience="cogo-api"
         )

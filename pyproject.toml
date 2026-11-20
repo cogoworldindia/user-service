@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "CoGo user accounts and profiles."
 requires-python = ">=3.13"
 dependencies = [
-    "cogo-common[db,events,telemetry]",
+    "cogo-common[db,redis,events,telemetry]",
     "alembic>=1.17",
     "uvicorn[standard]>=0.38",
     "boto3>=1.40",

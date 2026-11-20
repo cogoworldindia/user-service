@@ -2,6 +2,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from cogo_common.app import create_service_app
+from cogo_common.appconfig import AppConfig
 from cogo_common.auth import JWKSClient, TokenVerifier
 from cogo_common.auth.service_tokens import build_service_auth
 from cogo_common.db import Database
@@ -16,6 +17,12 @@ from app.api import router
 from app.clients import ChatClient, PlacesClient, SocialClient
 from app.config import Settings, get_settings
 from app.consumers import register_consumers
+from app.kyc.api import router as kyc_router
+from app.kyc.factory import build_provider
+from app.kyc.mailer import KycMailer
+from app.kyc.mock_pages import router as kyc_mock_router
+from app.kyc.providers import MockKycProvider
+from app.kyc.service import OtpPolicy
 from app.media import MediaStore
 
 
@@ -27,6 +34,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         max_overflow=settings.DB_MAX_OVERFLOW,
     )
     broker = create_broker(settings.RABBITMQ_URL, service_name=settings.SERVICE_NAME)
+    config = AppConfig.from_settings(settings)
+    kyc_provider = build_provider(settings)
     if settings.CONSUMERS_ENABLED:
         register_consumers(broker, db.sessionmaker)
     signer, service_verifier = build_service_auth(
@@ -50,6 +59,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.social = SocialClient(social)
         chat = InternalClient(settings.CHAT_SERVICE_URL, audience="chat-service", signer=signer)
         app.state.chat = ChatClient(chat)
+        app.state.kyc_http = create_http_client(timeout=10.0)  # the mock calls the webhook
         await jwks.prefetch()
         if settings.MEDIA_DEV_BOOTSTRAP:
             await app.state.media.dev_bootstrap()
@@ -64,6 +74,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await journey.aclose()
             await social.aclose()
             await chat.aclose()
+            await app.state.kyc_http.aclose()
+            await kyc_provider.aclose()
+            await config.aclose()
             await http.aclose()
             await db.dispose()
 
@@ -80,5 +93,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.broker = broker
     app.state.media = MediaStore(settings)
     app.state.service_verifier = service_verifier
+    app.state.config = config
+    app.state.kyc_provider = kyc_provider
+    app.state.kyc_mailer = KycMailer(broker, producer=settings.SERVICE_NAME)
+    app.state.kyc_otp = OtpPolicy(
+        hmac_key=settings.KYC_OTP_HMAC_KEY.get_secret_value().encode(),
+        ttl_seconds=settings.KYC_OTP_TTL_SECONDS,
+        max_attempts=settings.KYC_OTP_MAX_ATTEMPTS,
+        sends_per_hour=settings.KYC_OTP_SENDS_PER_HOUR,
+    )
     app.include_router(router)
+    app.include_router(kyc_router)
+    if isinstance(kyc_provider, MockKycProvider):
+        app.include_router(kyc_mock_router)
     return app

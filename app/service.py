@@ -171,6 +171,14 @@ class UserService:
                 assert user is not None
                 if user.account_status != AccountStatus.ACTIVE:
                     raise Forbidden("Account is not active", error_type="account_inactive")
+                if user.identity_locked and any(
+                    field in changes and changes[field] != getattr(user, field)
+                    for field in ("name", "dob")
+                ):  # spec §5.9: verified name and DOB are read-only
+                    raise Forbidden(
+                        "Your name and date of birth are verified and can't be changed",
+                        error_type="identity_locked",
+                    )
                 await self._apply(user, changes, place)
                 if user.username is None and user.name:
                     user.username = await self._free_username(user.name)

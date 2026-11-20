@@ -90,6 +90,7 @@ class MeProfileOut(BaseModel):
     stats: StatsOut
     kyc_level: str
     kyc_prompt: KycPromptOut
+    identity_locked: bool  # name and DOB are read-only (verified ID, or one under review)
     guide_seen: bool
     account_status: AccountStatus
     created_at: datetime

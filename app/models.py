@@ -13,6 +13,7 @@ from sqlalchemy import (
     Enum,
     Float,
     ForeignKey,
+    Index,
     Integer,
     SmallInteger,
     String,
@@ -21,7 +22,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import CITEXT
+from sqlalchemy.dialects.postgresql import CITEXT, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 
@@ -81,6 +82,14 @@ class User(TimestampMixin, Base):
         ARRAY(Integer), server_default=text("'{}'")
     )
     kyc_level: Mapped[str] = mapped_column(String(10), server_default=KycLevel.NONE.value)
+    # eKYC (spec §4.1, §5.9). Only the outcome is kept: never ID numbers, documents or the
+    # name/DOB the provider returned.
+    official_email: Mapped[str | None] = mapped_column(CITEXT)
+    email_verified_at: Mapped[datetime | None]
+    gov_id_verified_at: Mapped[datetime | None]
+    gov_id_type: Mapped[str | None] = mapped_column(String(30))
+    gov_id_last4: Mapped[str | None] = mapped_column(String(4))
+    kyc_review_status: Mapped[str | None] = mapped_column(String(20))
     kyc_prompt_snoozed_until: Mapped[datetime | None]
     guide_seen_at: Mapped[datetime | None]
     followers_count: Mapped[int] = mapped_column(server_default=text("0"))
@@ -93,7 +102,25 @@ class User(TimestampMixin, Base):
         lazy="raise", order_by="UserCoverPhoto.position"
     )
 
-    __table_args__ = (CheckConstraint("kyc_level IN ('none','partial','full')", name="kyc_level"),)
+    __table_args__ = (
+        CheckConstraint("kyc_level IN ('none','partial','full')", name="kyc_level"),
+        CheckConstraint(
+            "kyc_review_status IN ('pending_review','rejected')", name="kyc_review_status"
+        ),
+        # one account per verified official email
+        Index(
+            "uq_users_verified_official_email",
+            "official_email",
+            unique=True,
+            postgresql_where=text("email_verified_at IS NOT NULL"),
+        ),
+    )
+
+    @property
+    def identity_locked(self) -> bool:
+        """Name and DOB are read-only once an ID matched them, and while a mismatch awaits
+        review (so the profile can't be edited to fit the ID mid-review)."""
+        return self.gov_id_verified_at is not None or self.kyc_review_status == "pending_review"
 
 
 class UserCoverPhoto(Base):
@@ -151,6 +178,56 @@ class MediaUpload(Base):
     )
 
 
+class KycAttemptKind(StrEnum):
+    EMAIL = "email"
+    GOV_ID = "gov_id"
+
+
+class KycAttemptStatus(StrEnum):
+    STARTED = "started"  # gov_id: provider session created, waiting for its webhook
+    OTP_SENT = "otp_sent"  # email: code sent, waiting for the user
+    VERIFIED = "verified"
+    REVIEW = "review"  # gov_id: the ID is genuine but name or DOB didn't match
+    FAILED = "failed"  # provider failure, or too many wrong codes
+    EXPIRED = "expired"  # superseded by a newer attempt, or the code ran out
+
+
+class KycAttempt(TimestampMixin, Base):
+    """One verification attempt (spec §4.1). `result` holds ONLY name_match, dob_match,
+    id_type and last4; an email attempt keeps the address it verifies."""
+
+    __tablename__ = "kyc_attempts"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(String(10))
+    provider: Mapped[str | None] = mapped_column(String(30))
+    provider_ref: Mapped[str | None] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(10))
+    email: Mapped[str | None] = mapped_column(CITEXT)
+    otp_hash: Mapped[str | None] = mapped_column(String(64))
+    otp_expires_at: Mapped[datetime | None]
+    otp_attempts: Mapped[int] = mapped_column(SmallInteger, server_default=text("0"))
+    consent_at: Mapped[datetime | None]
+    result: Mapped[dict[str, object] | None] = mapped_column(JSONB)
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('email','gov_id')", name="kind"),
+        CheckConstraint(
+            "status IN ('started','otp_sent','verified','review','failed','expired')",
+            name="status",
+        ),
+        Index("ix_kyc_attempts_user_kind_created", "user_id", "kind", text("created_at DESC")),
+        Index(
+            "uq_kyc_attempts_provider_ref",
+            "provider",
+            "provider_ref",
+            unique=True,
+            postgresql_where=text("provider_ref IS NOT NULL"),
+        ),
+    )
+
+
 class BlockProjection(Base):
     """Fed by social.user_blocked/unblocked; unblock keeps a tombstone (active=false)."""
 
@@ -167,6 +244,9 @@ __all__ = [
     "Base",
     "BlockProjection",
     "Gender",
+    "KycAttempt",
+    "KycAttemptKind",
+    "KycAttemptStatus",
     "KycLevel",
     "MediaUpload",
     "OutboxMessage",

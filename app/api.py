@@ -1,6 +1,5 @@
 import asyncio
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from typing import Annotated, Any
 from uuid import UUID
 
@@ -10,12 +9,12 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients import ChatClient, PlacesClient, SocialClient
-from app.models import KycLevel, User
+from app.kyc.api import prompt_out
+from app.models import User
 from app.schemas import (
     CityOut,
     CoverIn,
     CoverOut,
-    KycPromptOut,
     LegacyMeOut,
     LegacyProfileOut,
     LegacyProfileUpdate,
@@ -73,13 +72,6 @@ def _stats(user: User) -> StatsOut:
     )
 
 
-def _kyc_prompt(user: User) -> KycPromptOut:
-    snoozed = user.kyc_prompt_snoozed_until and user.kyc_prompt_snoozed_until > datetime.now(UTC)
-    show = user.kyc_level != KycLevel.FULL.value and not snoozed
-    variant = "none" if user.kyc_level == KycLevel.NONE.value else "partial_need_id"
-    return KycPromptOut(show=bool(show), variant=variant)
-
-
 async def _me(user: User, users: UserService) -> MeProfileOut:
     tags = await users.tags(list(user.personality_tag_ids or []))
     return MeProfileOut(
@@ -97,7 +89,8 @@ async def _me(user: User, users: UserService) -> MeProfileOut:
         personality_tags=[TagOut.model_validate(t) for t in tags],
         stats=_stats(user),
         kyc_level=user.kyc_level,
-        kyc_prompt=_kyc_prompt(user),
+        kyc_prompt=prompt_out(user),
+        identity_locked=user.identity_locked,
         guide_seen=user.guide_seen_at is not None,
         account_status=user.account_status,
         created_at=user.created_at,
