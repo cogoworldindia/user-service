@@ -13,6 +13,7 @@ always comes from the verified token, so a user can only ever change their own d
 | Method | Path | Notes |
 |---|---|---|
 | GET, PATCH | `/v1/me` | Own profile, stats, `kyc_level`, `kyc_prompt`, `identity_locked`, `guide_seen`. PATCH bumps `version` and emits `user.updated` |
+| DELETE | `/v1/me` | Account deletion: needs `X-Reauth-Token` from auth-service's re-confirm code. Anonymises the profile and emits `user.deleted` |
 | PUT | `/v1/me/cover-photos` | Up to 3 |
 | POST | `/v1/me/guide/seen` | First-run coach marks |
 | GET | `/v1/personality-tags` | |
@@ -36,6 +37,21 @@ always comes from the verified token, so a user can only ever change their own d
 Selected by `KYC_PROVIDER` (`mock` | `cashfree`). Misconfiguration fails at startup, and the mock
 is refused in staging and production. Only outcomes are stored: the verified email, ID type,
 last 4 digits and match booleans. The name and DOB on the ID are never stored, logged or queued.
+
+## Admin and moderation (M7)
+
+- **`/internal/admin/*`** (admin-service only):
+  - user search and detail;
+  - suspend, ban and reinstate (which emit `user.status_changed`);
+  - KYC review approve and reject;
+  - photo preview and takedown.
+- **Image moderation:** a confirmed upload queues `media.uploaded` to this service.
+  - Cloud Vision SafeSearch (`IMAGE_MODERATION_PROVIDER=google`, or a mock) takes a flagged
+    photo down and emits `media.flagged`.
+- **Jobs (`app/jobs.py`)**, safe on several replicas:
+  - lift suspensions that ran out;
+  - the deletion tracker, which polls every service's `deletion-status` until a deletion is
+    complete and alerts after 24 h.
 
 ## Events
 

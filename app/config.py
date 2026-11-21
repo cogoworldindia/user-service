@@ -24,6 +24,10 @@ class Settings(ServiceSettings):
     JOURNEY_SERVICE_URL: str = "http://journey-service:8000"
     SOCIAL_SERVICE_URL: str = "http://social-service:8000"
     CHAT_SERVICE_URL: str = "http://chat-service:8000"
+    AUTH_SERVICE_URL: str = "http://auth-service:8000"
+    NOTIFICATION_SERVICE_URL: str = "http://notification-service:8000"
+    # Account deletion needs a fresh OTP re-confirm: a short token auth-service issues for it
+    REAUTH_AUDIENCE: str = "cogo-reauth"
 
     # Media (S3-compatible: MinIO in dev, S3/GCS in prod)
     MEDIA_BUCKET: str = "cogo-media"
@@ -54,6 +58,15 @@ class Settings(ServiceSettings):
     KYC_CASHFREE_CLIENT_SECRET: SecretStr | None = None
     KYC_CASHFREE_PUBLIC_KEY_FILE: Path | None = None  # x-cf-signature instead of IP allow-list
     KYC_CASHFREE_DOCUMENTS: list[str] = Field(default_factory=lambda: ["AADHAAR"])  # or PAN, ...
+
+    # Image moderation (spec §5.10): Cloud Vision SafeSearch, or a mock in development
+    IMAGE_MODERATION_PROVIDER: Literal["mock", "google"] = "mock"
+    GOOGLE_VISION_API_KEY: SecretStr | None = None
+
+    # Periodic jobs: suspensions that run out, the account-deletion tracker
+    JOBS_ENABLED: bool = True
+    JOBS_INTERVAL_SECONDS: float = 60.0
+    DELETION_ALERT_HOURS: float = 24.0
 
     CONSUMERS_ENABLED: bool = True
 

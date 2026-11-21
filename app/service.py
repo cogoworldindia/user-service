@@ -1,11 +1,11 @@
 import re
 import secrets
 from datetime import UTC, date, datetime, timedelta
-from typing import Any
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from cogo_common.errors import BadRequest, Conflict, Forbidden, NotFound
-from cogo_common.events.contracts import CitySnapshot, UserSnapshot
+from cogo_common.events.contracts import CitySnapshot, MediaUploaded, UserSnapshot
 from cogo_common.events.envelope import EventEnvelope
 from cogo_common.events.outbox import enqueue
 from cogo_common.events.topology import RoutingKeys
@@ -302,6 +302,20 @@ class UserService:
             if size > self._media.max_bytes or content_type != upload.content_type:
                 await self._media.delete(upload.object_key)
                 raise BadRequest("File too large or wrong type", error_type="invalid_upload")
-            # Image moderation (Cloud Vision SafeSearch) runs here in M7; until then: ready.
+            # Usable now; image moderation (spec §5.10) runs off the request path and takes
+            # it down if SafeSearch flags it.
             upload.status = MediaStatus.READY.value
+            enqueue(
+                self._session,
+                EventEnvelope(
+                    type=RoutingKeys.MEDIA_UPLOADED,
+                    producer=PRODUCER,
+                    data=MediaUploaded(
+                        media_id=upload.id,
+                        owner_id=upload.user_id,
+                        kind=cast(Literal["avatar", "cover"], upload.kind),
+                        object_key=upload.object_key,
+                    ).model_dump(mode="json"),
+                ),
+            )
         return upload

@@ -1,14 +1,18 @@
 import asyncio
 from collections.abc import AsyncIterator
-from typing import Annotated, Any
+from datetime import datetime
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from cogo_common.auth import CurrentUser
+from cogo_common.errors import Forbidden
 from cogo_common.responses import Envelope, ok
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Header, Request
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients import ChatClient, PlacesClient, SocialClient
+from app.deletion import AccountDeletion
 from app.kyc.api import prompt_out
 from app.models import User
 from app.schemas import (
@@ -149,6 +153,34 @@ async def put_covers(
         raise BadRequest("At most 3 cover photos", error_type="invalid_covers")
     user = await users.set_covers(principal.user_id, [(c.position, str(c.url)) for c in body])
     return ok(_covers(user), message="Cover photos updated")
+
+
+class DeletionOut(BaseModel):
+    status: Literal["deleting"]
+    deleted_at: datetime
+
+
+@router.delete("/me", status_code=202, response_model=Envelope[DeletionOut])
+async def delete_me(
+    request: Request,
+    principal: CurrentUser,
+    session: Annotated[AsyncSession, Depends(_session)],
+    reauth: Annotated[str | None, Header(alias="X-Reauth-Token")] = None,
+) -> Envelope[DeletionOut]:
+    """Spec §6.2: deleting the account needs a fresh OTP re-confirm. auth-service issues a
+    5-minute token for it (`POST /v1/auth/reauth/verify`); every service then cleans up
+    its own data from `user.deleted` (spec §7)."""
+    if not reauth:
+        raise Forbidden("Confirm with a fresh code first", error_type="reauth_required")
+    proof = await request.app.state.reauth_verifier.verify(reauth)
+    if proof.user_id != principal.user_id or proof.claims.get("purpose") != "delete_account":
+        raise Forbidden("Confirm with a fresh code first", error_type="reauth_required")
+    deleted_at = await AccountDeletion(session, media=request.app.state.media).delete(
+        principal.user_id
+    )
+    return ok(
+        DeletionOut(status="deleting", deleted_at=deleted_at), code=202, message="Account deleted"
+    )
 
 
 @router.post("/me/guide/seen", response_model=Envelope[None])

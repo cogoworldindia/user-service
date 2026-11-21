@@ -28,6 +28,34 @@ SERVICE_DIR = Path(__file__).resolve().parents[1]
 SIGNING_KEY = Ed25519PrivateKey.generate()
 _JWK = {**json.loads(OKPAlgorithm.to_jwk(SIGNING_KEY.public_key())), "kid": "test", "alg": "EdDSA"}
 MEDIA_KEY, MEDIA_SECRET = "cogo", "cogo-secret-123"
+OTHER_SERVICE_KEYS = {
+    name: Ed25519PrivateKey.generate() for name in ("admin-service", "journey-service")
+}
+
+
+def service_headers(caller: str, admin_id: UUID | None = None) -> dict[str, str]:
+    from cogo_common.auth.service_tokens import ServiceTokenSigner
+
+    token = ServiceTokenSigner(caller, OTHER_SERVICE_KEYS[caller]).token_for("user-service")
+    headers = {"Authorization": f"Bearer {token}"}
+    if admin_id is not None:
+        headers["X-Admin-Id"] = str(admin_id)
+    return headers
+
+
+def mint_reauth(user_id: UUID, purpose: str = "delete_account") -> str:
+    now = int(time.time())
+    claims = {
+        "iss": "cogo-auth",
+        "aud": "cogo-reauth",
+        "sub": str(user_id),
+        "sid": "s",
+        "purpose": purpose,
+        "iat": now,
+        "exp": now + 300,
+        "jti": uuid4().hex,
+    }
+    return jwt.encode(claims, SIGNING_KEY, algorithm="EdDSA", headers={"kid": "test"})
 
 
 def mint(user_id: UUID) -> str:
@@ -108,6 +136,12 @@ def service_keys(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
             serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
         )
     )
+    for name, other in OTHER_SERVICE_KEYS.items():
+        (root / "public" / f"{name}.pem").write_bytes(
+            other.public_key().public_bytes(
+                serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+            )
+        )
     return root / "user-service.pem", root / "public"
 
 
@@ -179,6 +213,7 @@ async def app(migrated: dict[str, str], service_keys: tuple[Path, Path]) -> Asyn
         KYC_MOCK_WEBHOOK_SECRET=SecretStr("test-mock-secret"),
         KYC_PUBLIC_BASE_URL="http://user",
         KYC_MOCK_WEBHOOK_URL="http://user/v1/webhooks/kyc/mock",
+        JOBS_ENABLED=False,  # tests run the jobs themselves
     )
     application = create_app(settings)
     async with LifespanManager(application):
@@ -189,6 +224,9 @@ async def app(migrated: dict[str, str], service_keys: tuple[Path, Path]) -> Asyn
         application.state.kyc_mailer = FakeMailer()
         application.state.token_verifier = TokenVerifier(
             StaticKeyProvider([jwt.PyJWK(_JWK)]), issuer="cogo-auth", audience="cogo-api"
+        )
+        application.state.reauth_verifier = TokenVerifier(
+            StaticKeyProvider([jwt.PyJWK(_JWK)]), issuer="cogo-auth", audience="cogo-reauth"
         )
         application.state.places = FakePlaces()
         application.state.social = FakeSocial()

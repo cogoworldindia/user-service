@@ -97,6 +97,8 @@ class User(TimestampMixin, Base):
     journeys_count: Mapped[int] = mapped_column(server_default=text("0"))
     version: Mapped[int] = mapped_column(BigInteger, server_default=text("1"))
     deleted_at: Mapped[datetime | None]
+    # choreographed deletion (spec §7): set once every service reports it has finished
+    deletion_completed_at: Mapped[datetime | None]
 
     covers: Mapped[list["UserCoverPhoto"]] = relationship(
         lazy="raise", order_by="UserCoverPhoto.position"
@@ -113,6 +115,16 @@ class User(TimestampMixin, Base):
             "official_email",
             unique=True,
             postgresql_where=text("email_verified_at IS NOT NULL"),
+        ),
+        Index(  # the deletion tracker's work list
+            "ix_users_deletion_pending",
+            "deleted_at",
+            postgresql_where=text("deleted_at IS NOT NULL AND deletion_completed_at IS NULL"),
+        ),
+        Index(  # suspensions that run out
+            "ix_users_suspension_ends",
+            "suspended_until",
+            postgresql_where=text("account_status = 'suspended'"),
         ),
     )
 

@@ -59,6 +59,13 @@ class MediaStore:
 
         return await asyncio.to_thread(_head)
 
+    async def get(self, key: str) -> bytes:
+        def _get() -> bytes:
+            body: bytes = self._s3.get_object(Bucket=self.bucket, Key=key)["Body"].read()
+            return body
+
+        return await asyncio.to_thread(_get)
+
     async def delete(self, key: str) -> None:
         await asyncio.to_thread(self._s3.delete_object, Bucket=self.bucket, Key=key)
 

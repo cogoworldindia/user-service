@@ -85,6 +85,29 @@ def email_domain_blocked(email: str, blocked: list[str]) -> bool:
     return any(domain == d or domain.endswith(f".{d}") for d in (b.lower() for b in blocked))
 
 
+async def relevel(session: AsyncSession, user: User) -> None:
+    """Recompute the level (spec §5.9); on a change bump the version and emit (inside the
+    caller's transaction, user row locked)."""
+    level = derive_kyc_level(
+        email_verified=user.email_verified_at is not None,
+        gov_id_verified=user.gov_id_verified_at is not None,
+    )
+    if level == user.kyc_level:
+        return
+    previous, user.kyc_level = user.kyc_level, level
+    user.version += 1
+    user.updated_at = datetime.now(UTC)
+    await session.flush()
+    payload = UserKycLevelChanged(
+        **snapshot(user).model_dump(), previous_kyc_level=previous
+    ).model_dump(mode="json")
+    enqueue(
+        session,
+        EventEnvelope(type=RoutingKeys.USER_KYC_LEVEL_CHANGED, producer=PRODUCER, data=payload),
+    )
+    log.info("kyc_level_changed", user_id=str(user.id), kyc_level=level, previous=previous)
+
+
 class KycService:
     def __init__(
         self,
@@ -151,25 +174,7 @@ class KycService:
         )
 
     async def _relevel(self, user: User) -> None:
-        """Recompute the level (spec §5.9); on a change bump the version and emit."""
-        level = derive_kyc_level(
-            email_verified=user.email_verified_at is not None,
-            gov_id_verified=user.gov_id_verified_at is not None,
-        )
-        if level == user.kyc_level:
-            return
-        previous, user.kyc_level = user.kyc_level, level
-        user.version += 1
-        user.updated_at = datetime.now(UTC)
-        await self._session.flush()
-        payload = UserKycLevelChanged(
-            **snapshot(user).model_dump(), previous_kyc_level=previous
-        ).model_dump(mode="json")
-        enqueue(
-            self._session,
-            EventEnvelope(type=RoutingKeys.USER_KYC_LEVEL_CHANGED, producer=PRODUCER, data=payload),
-        )
-        log.info("kyc_level_changed", user_id=str(user.id), kyc_level=level, previous=previous)
+        await relevel(self._session, user)
 
     def _code_hash(self, attempt_id: UUID, code: str) -> str:
         return hmac.new(
@@ -334,6 +339,7 @@ class KycService:
                     retry_after=3600,
                 )
             await self._supersede(user_id, KycAttemptKind.GOV_ID, KycAttemptStatus.STARTED.value)
+            user.kyc_review_status = None  # a fresh check after a rejected review
             attempt = KycAttempt(
                 id=new_id(),
                 user_id=user_id,

@@ -1,5 +1,6 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 from cogo_common.app import create_service_app
 from cogo_common.appconfig import AppConfig
@@ -14,9 +15,12 @@ from cogo_common.internal_http import InternalClient
 from fastapi import FastAPI
 
 from app.api import router
+from app.api_internal import router as internal_router
 from app.clients import ChatClient, PlacesClient, SocialClient
 from app.config import Settings, get_settings
 from app.consumers import register_consumers
+from app.deletion import DeletionTracker
+from app.jobs import Jobs
 from app.kyc.api import router as kyc_router
 from app.kyc.factory import build_provider
 from app.kyc.mailer import KycMailer
@@ -24,6 +28,7 @@ from app.kyc.mock_pages import router as kyc_mock_router
 from app.kyc.providers import MockKycProvider
 from app.kyc.service import OtpPolicy
 from app.media import MediaStore
+from app.moderation import GoogleVisionModerator, ImageModerator, MockImageModerator
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -36,8 +41,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     broker = create_broker(settings.RABBITMQ_URL, service_name=settings.SERVICE_NAME)
     config = AppConfig.from_settings(settings)
     kyc_provider = build_provider(settings)
+    media = MediaStore(settings)
+    moderator = build_moderator(settings)
     if settings.CONSUMERS_ENABLED:
-        register_consumers(broker, db.sessionmaker)
+        register_consumers(broker, db.sessionmaker, media=media, moderator=moderator)
     signer, service_verifier = build_service_auth(
         settings.SERVICE_NAME, settings.SERVICE_PRIVATE_KEY_FILE, settings.SERVICE_PUBLIC_KEYS_DIR
     )
@@ -48,6 +55,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         jwks = JWKSClient(settings.AUTH_JWKS_URL, http=http)
         app.state.token_verifier = TokenVerifier(
             jwks, issuer=settings.JWT_ISSUER, audience=settings.JWT_AUDIENCE
+        )
+        app.state.reauth_verifier = TokenVerifier(
+            jwks, issuer=settings.JWT_ISSUER, audience=settings.REAUTH_AUDIENCE
         )
         journey = InternalClient(
             settings.JOURNEY_SERVICE_URL, audience="journey-service", signer=signer
@@ -60,22 +70,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         chat = InternalClient(settings.CHAT_SERVICE_URL, audience="chat-service", signer=signer)
         app.state.chat = ChatClient(chat)
         app.state.kyc_http = create_http_client(timeout=10.0)  # the mock calls the webhook
+        participants = {  # spec §7: who has to finish a deletion
+            "auth": InternalClient(
+                settings.AUTH_SERVICE_URL, audience="auth-service", signer=signer
+            ),
+            "journey": journey,
+            "social": social,
+            "chat": chat,
+            "notification": InternalClient(
+                settings.NOTIFICATION_SERVICE_URL, audience="notification-service", signer=signer
+            ),
+        }
+        app.state.deletion_tracker = DeletionTracker(
+            db.sessionmaker,
+            participants,
+            alert_after=timedelta(hours=settings.DELETION_ALERT_HOURS),
+        )
+        jobs = Jobs(
+            db.sessionmaker, app.state.deletion_tracker, interval=settings.JOBS_INTERVAL_SECONDS
+        )
         await jwks.prefetch()
         if settings.MEDIA_DEV_BOOTSTRAP:
             await app.state.media.dev_bootstrap()
         await start_broker(broker, declare=declare_topology)
         relay = OutboxRelay(db.sessionmaker, rabbit_publisher(broker))
         relay.start()
+        config.start()
+        if settings.JOBS_ENABLED:
+            jobs.start()
         try:
             yield
         finally:
+            await jobs.stop()
             await relay.stop()
             await broker.stop()
-            await journey.aclose()
-            await social.aclose()
-            await chat.aclose()
+            for client in participants.values():
+                await client.aclose()
             await app.state.kyc_http.aclose()
             await kyc_provider.aclose()
+            await moderator.aclose()
             await config.aclose()
             await http.aclose()
             await db.dispose()
@@ -91,7 +124,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.db = db
     app.state.broker = broker
-    app.state.media = MediaStore(settings)
+    app.state.media = media
     app.state.service_verifier = service_verifier
     app.state.config = config
     app.state.kyc_provider = kyc_provider
@@ -104,6 +137,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.include_router(router)
     app.include_router(kyc_router)
+    app.include_router(internal_router)
     if isinstance(kyc_provider, MockKycProvider):
         app.include_router(kyc_mock_router)
     return app
+
+
+def build_moderator(settings: Settings) -> ImageModerator:
+    if settings.IMAGE_MODERATION_PROVIDER == "google":
+        if settings.GOOGLE_VISION_API_KEY is None:
+            raise RuntimeError(
+                "GOOGLE_VISION_API_KEY is required for IMAGE_MODERATION_PROVIDER=google"
+            )
+        return GoogleVisionModerator(settings.GOOGLE_VISION_API_KEY.get_secret_value())
+    return MockImageModerator()
