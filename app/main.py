@@ -12,6 +12,7 @@ from cogo_common.events.outbox import OutboxRelay, rabbit_publisher
 from cogo_common.events.topology import declare_topology
 from cogo_common.http import create_http_client
 from cogo_common.internal_http import InternalClient
+from cogo_common.maintenance import from_settings as maintenance_from_settings
 from fastapi import FastAPI
 
 from app.api import router
@@ -37,6 +38,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         settings.DATABASE_URL,
         pool_size=settings.DB_POOL_SIZE,
         max_overflow=settings.DB_MAX_OVERFLOW,
+        prepared_statements=settings.DB_PREPARED_STATEMENTS,
     )
     broker = create_broker(settings.RABBITMQ_URL, service_name=settings.SERVICE_NAME)
     config = AppConfig.from_settings(settings)
@@ -95,6 +97,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await start_broker(broker, declare=declare_topology)
         relay = OutboxRelay(db.sessionmaker, rabbit_publisher(broker))
         relay.start()
+        maintenance = maintenance_from_settings(
+            settings,
+            db.sessionmaker,
+            service=settings.SERVICE_NAME,
+            has_inbox=True,
+            has_outbox=True,
+        )
+        maintenance.start(purge=settings.MAINTENANCE_ENABLED)
         config.start()
         if settings.JOBS_ENABLED:
             jobs.start()
@@ -102,6 +112,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             yield
         finally:
             await jobs.stop()
+            await maintenance.stop()
             await relay.stop()
             await broker.stop()
             for client in participants.values():

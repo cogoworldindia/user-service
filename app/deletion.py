@@ -14,6 +14,7 @@ from cogo_common.events.outbox import enqueue
 from cogo_common.events.topology import RoutingKeys
 from cogo_common.internal_http import InternalClient
 from cogo_common.logging import get_logger
+from cogo_common.metrics import gauge
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -96,6 +97,12 @@ class DeletionTracker:
         self._participants = participants
         self._alert_after = alert_after
         self._alerted: dict[UUID, datetime] = {}
+        self.overdue = 0
+        gauge(
+            "account_deletions_overdue",
+            "Account deletions still incomplete after the alert window (24 h)",
+            lambda: [(float(self.overdue), {})],
+        )
 
     async def _done(self, name: str, user_id: UUID) -> bool:
         try:
@@ -122,7 +129,7 @@ class DeletionTracker:
                     .limit(limit)
                 )
             ).all()
-        completed = 0
+        completed, overdue = 0, 0
         now = datetime.now(UTC)
         for user_id, deleted_at in rows:
             waiting = await self.pending(user_id)
@@ -135,8 +142,10 @@ class DeletionTracker:
                 completed += 1
                 log.info("account_deletion_completed", user_id=str(user_id))
             elif deleted_at is not None and now - deleted_at > self._alert_after:
+                overdue += 1
                 last = self._alerted.get(user_id)
                 if last is None or now - last > timedelta(hours=1):  # alert hourly, not per run
                     self._alerted[user_id] = now
                     log.error("account_deletion_incomplete", user_id=str(user_id), pending=waiting)
+        self.overdue = overdue
         return completed

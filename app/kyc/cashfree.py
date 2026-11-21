@@ -144,7 +144,8 @@ class CashfreeDigiLockerProvider:
         if not timestamp or not signature:
             return False
         digest = hmac.new(self._secret, timestamp.encode() + body, hashlib.sha256).digest()
-        return hmac.compare_digest(signature, base64.b64encode(digest).decode())
+        # bytes: compare_digest raises on a str with non-ASCII characters (see providers)
+        return hmac.compare_digest(signature.encode(), base64.b64encode(digest))
 
     async def parse_result(self, payload: Mapping[str, Any]) -> KycResult | None:
         event = payload.get("event_type")

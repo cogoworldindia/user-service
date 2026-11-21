@@ -156,6 +156,8 @@ def test_webhook_signature() -> None:
     assert not cf.verify_webhook(headers, raw.replace(b"a1", b"a2"))  # body changed
     assert not cf.verify_webhook({**headers, "x-webhook-timestamp": "1"}, raw)  # timestamp signed
     assert not cf.verify_webhook({"x-webhook-timestamp": headers["x-webhook-timestamp"]}, raw)
+    # non-ASCII (headers arrive latin-1 decoded): False, not a TypeError (found by fuzzing)
+    assert not cf.verify_webhook({**headers, "x-webhook-signature": "sïgnature"}, raw)
 
 
 async def test_success_fetches_the_masked_aadhaar() -> None:

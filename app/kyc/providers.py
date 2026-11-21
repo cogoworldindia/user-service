@@ -78,7 +78,8 @@ class MockKycProvider:
 
     def verify_webhook(self, headers: Mapping[str, str], body: bytes) -> bool:
         signature = headers.get(self.SIGNATURE_HEADER, "")
-        return bool(signature) and hmac.compare_digest(signature, self.sign(body))
+        # bytes: compare_digest raises on a str with non-ASCII characters (a 500, found by fuzzing)
+        return bool(signature) and hmac.compare_digest(signature.encode(), self.sign(body).encode())
 
     async def parse_result(self, payload: Mapping[str, Any]) -> KycResult | None:
         try:

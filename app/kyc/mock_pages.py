@@ -31,8 +31,9 @@ MISMATCH_NAME = "Ramesh Iyer"
 
 def _provider(request: Request, ref: str, sig: str) -> MockKycProvider:
     provider = request.app.state.kyc_provider
+    # bytes: compare_digest raises on a str with non-ASCII characters (a 500, found by fuzzing)
     if not isinstance(provider, MockKycProvider) or not hmac.compare_digest(
-        sig, provider.page_signature(ref)
+        sig.encode(), provider.page_signature(ref).encode()
     ):
         raise NotFound("Session not found")
     return provider

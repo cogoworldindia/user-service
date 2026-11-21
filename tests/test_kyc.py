@@ -445,6 +445,15 @@ async def test_webhook_checks_the_signature_and_is_idempotent(
         "dob": "1994-08-15",
     }
     assert err(await deliver(result, signature="0" * 64)) == (401, "invalid_signature")
+    latin = await client.post(  # a non-ASCII header value, as raw bytes on the wire
+        "/v1/webhooks/kyc/mock",
+        content=json.dumps(result).encode(),
+        headers={MOCK_SIGNATURE: ("é" * 64).encode("latin-1")},
+    )
+    assert err(latin) == (401, "invalid_signature")
+    # the mock page with a non-ASCII signature or ref: 404, not a 500 (found by fuzzing)
+    for path in (f"/v1/kyc/mock/{ref}?sig=%C3%A9", "/v1/kyc/mock/%C2%B3%C3%85?sig=x"):
+        assert (await client.get(path)).status_code == 404
     assert (await client.post("/v1/webhooks/kyc/cashfree", content=b"{}")).status_code == 404
     assert err(await deliver(b"not json")) == (400, "invalid_payload")
     assert err(await deliver({"ref": ref})) == (400, "invalid_payload")
